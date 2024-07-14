@@ -1,0 +1,177 @@
+---
+title: "CPESR"
+author: "CPESR"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+options(dplyr.summarise.inform = FALSE)
+knitr::opts_chunk$set(fig.asp = 9/16, fig.retina = 2)
+
+library(tidyverse)
+library(ggcpesrthemes)
+theme_set(theme_cpesr())
+theme_cpesr_setup(authors = "Julien Gossa", source = "https://github.com/cpesr/RFC/")
+```
+
+## Données 
+
+- https://www.hatvp.fr/open-data/
+
+```{r load}
+dec17 <- read.csv("declarations_2017.csv") %>% mutate(Version = as.character(Version))
+dec21 <- read.csv("declarations_2021.csv") %>% mutate(Version = as.character(Version))
+dec22 <- read.csv("declarations_2022.csv") %>% mutate(Version = as.character(Version))
+dec24 <- read.csv("declarations_2024.csv") %>% mutate(Version = as.character(Version))
+
+dec <- bind_rows(dec17,dec21,dec24) %>%
+  mutate(Date_depot = as.Date(Date_depot, format = "%d/%m/%Y"))
+
+vdec <- dec %>%
+  select(Nom,Prénom,Date_depot) %>%
+  unique() %>% 
+  arrange(Nom,Prénom,Date_depot) %>% 
+  mutate(ver = rank(desc(Date_depot)), .by = c(Nom,Prénom)) 
+
+dec <- left_join(dec,vdec)
+
+ldec <- dec %>% filter(ver == 1)
+```
+
+## Explorations
+
+```{r Section, results='asis'}
+ldec %>% 
+  summarise(nb = n(), .by = c(Section)) %>%
+  spoiler_table("Section")
+```
+
+```{r type_mandat, results='asis'}
+ldec %>% 
+  summarise(nb = n(), .by = c(Type_mandat)) %>%
+  spoiler_table("Type_mandat")
+```
+
+
+```{r types}
+ldec %>% 
+  summarise(nb = n(), .by = c(Type_mandat,Section)) %>%
+  ggplot(aes(x=Section,y=nb,fill=Section)) +
+  geom_col() +
+  facet_wrap(Type_mandat~., scales = "free_y", labeller = label_wrap_gen(25)) +
+  theme(legend.position = "right", axis.text.x = element_blank())
+```
+
+
+```{r partfin, results='asis'}
+ldec %>%
+  filter(Section == "participationfinancieredto") %>%
+  summarise(
+    Nb_parts = sum(as.numeric(Détails)),
+    Valeur = sum(Valeur),
+    .by = Description) %>%
+  arrange(desc(Valeur)) %>%
+  spoiler_table(trim=20)
+```
+
+## Personnes 
+
+```{r pers}
+ldec %>%
+  summarise(Valeur = sum(Valeur),
+            .by = c(Nom,Prénom,Type_mandat,Mandat)) %>% 
+  group_by(Type_mandat) %>%
+  arrange(desc(Valeur)) %>%
+  slice_head(n=10) 
+```
+
+## Gouv
+
+```{r gouv}
+gouvnom <- dec %>%
+  filter(Type_mandat == "membre du gouvernement") %>%
+  filter(Date_depot>=as.Date("2024-01-01")) %>%
+  select(Nom,Prénom) %>%
+  unique() %>%
+  mutate(gouvernement = TRUE)
+
+gouv <- dec %>%
+  left_join(gouvnom) %>%
+  filter(gouvernement) %>%
+  arrange(Nom,Date_depot)
+
+gouvsum <- gouv %>%
+  filter(Section != "passifDto") %>%
+  summarise(Patrimoine = sum(Valeur), .by=c(Nom,Prénom,Date_depot,ver)) %>%
+  arrange(Nom,ver) %>%
+  mutate(
+    diff = first(Patrimoine) - Patrimoine,
+    temps = as.double(difftime(first(Date_depot),Date_depot,units = "days"))/365,
+    diffsmic = diff / 16784.32,
+    .by = Nom
+  )
+```
+
+```{r gouvplot, fig.asp=3/4}
+gouvsum %>%
+  filter(ver==1 | (Date_depot < as.Date("2022-09-30") & Date_depot > as.Date("2022-05-01"))) %>%
+  mutate(Date = str_sub(as.character(Date_depot),1,4)) %>% 
+  #filter(n() !=2, .by = Nom) %>% View()
+  ggplot(aes(x=Patrimoine,y=reorder(paste(Prénom,Nom),Patrimoine),fill=Date, alpha=Date)) +
+  geom_col(position = "identity") +
+  scale_x_continuous(labels = ~ paste(.x/1e6,"M€"), name="Patrimoine déclaré") +
+  scale_y_discrete(name="") +
+  scale_fill_brewer(palette = "Paired", direction = 1) +
+  scale_alpha_manual(values=c(0.5,1)) +
+  labs(
+    title="Patrimoine déclaré par les membres du gouvernement",
+    source="",
+    caption="Source : HATPV https://www.hatvp.fr/consulter-les-declarations/ \nDéclarations de patrimoine hors passif") 
+```
+
+```{r gouvtab, results='asis'}
+st <- function(df, title="Voir les données", trim = Inf) {
+  cat("\n<details>\n")
+  cat("  <summary>",title,"</summary>\n\n")
+  
+  print(kableExtra::kable(head(df,n=trim), format="pipe", align=rep('r', 4)))
+  
+  cat("\n\n</details>\n")
+}
+
+gouvsum %>%
+  filter(ver==1 | (Date_depot < as.Date("2022-09-30") & Date_depot > as.Date("2022-05-01"))) %>%
+  mutate(Date = str_sub(as.character(Date_depot),1,4)) %>%
+  select(Prénom, Nom, Date, Patrimoine) %>%
+  mutate(Patrimoine = str_pad(format(Patrimoine, big.mark=' '),20)) %>%
+  pivot_wider(names_from = Date, values_from = Patrimoine, names_prefix = "Patrimoine ") %>%
+  arrange(desc(`Patrimoine 2024`)) %>%
+  st()
+```
+
+
+
+```{r perso, fig.asp=3/4}
+perso <- function(nom) {
+  gouv %>%
+    filter(ver==1 | (Date_depot < as.Date("2022-09-30") & Date_depot > as.Date("2022-05-01"))) %>%
+    mutate(Date = str_sub(as.character(Date_depot),1,4)) %>% 
+    filter(Nom == nom) %>%
+    summarise(Patrimoine = sum(Valeur), .by=c(Nom,Prénom,Date_depot,Date,ver,Section)) %>%
+    arrange(Nom,Section,ver) %>%
+    ggplot(aes(x=Patrimoine,y=reorder(Section,Patrimoine),fill=Date)) +
+      geom_col(position = "dodge") +
+      scale_x_continuous(labels = ~ paste(.x/1e6,"M€"), name="Patrimoine déclaré") +
+      scale_y_discrete(name="") +
+      scale_fill_brewer(palette = "Paired", direction = 1)+
+      labs(
+        title="Patrimoine déclaré par les membres du gouvernement",
+        source="",
+        caption="Source : HATPV https://www.hatvp.fr/consulter-les-declarations/ \nDéclarations de patrimoine hors passif") 
+}
+
+perso("riester")
+perso("oudéa-castéra")
+```
